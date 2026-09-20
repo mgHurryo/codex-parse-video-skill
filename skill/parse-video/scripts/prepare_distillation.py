@@ -561,7 +561,7 @@ def run_local_asr(
     has_audio: bool,
 ) -> dict[str, object]:
     if not has_audio:
-        return {"status": "no_audio", "backend": "local-whisper-cpp"}
+        return {"status": "no_audio", "backend": "none"}
     if not whisper_model.expanduser().resolve().is_file():
         raise RuntimeError(f"本地 Whisper 模型不存在：{whisper_model}")
     audio_dir = job_dir / "audio"
@@ -590,24 +590,27 @@ def run_local_asr(
         label="提取 16kHz 单声道音频",
     )
     output_prefix = evidence_dir / "transcript.timestamped"
+    openvino_adapter = whisper_cli.parent / "openvino-whisper-config.json"
+    whisper_command = [
+        *executable_command(whisper_cli),
+        "-m",
+        str(whisper_model.expanduser().resolve()),
+        "-f",
+        str(audio_path),
+        "-l",
+        "auto",
+    ]
+    if not openvino_adapter.is_file():
+        whisper_command.extend(["-t", "8", "-ng"])
+    whisper_command.extend([
+        "-osrt",
+        "-ojf",
+        "-of",
+        str(output_prefix),
+        "-np",
+    ])
     run_checked(
-        executable_command(
-            whisper_cli,
-            "-m",
-            str(whisper_model.expanduser().resolve()),
-            "-f",
-            str(audio_path),
-            "-l",
-            "auto",
-            "-t",
-            "8",
-            "-ng",
-            "-osrt",
-            "-ojf",
-            "-of",
-            str(output_prefix),
-            "-np",
-        ),
+        whisper_command,
         env=env,
         timeout=timeout,
         label="本地语音转写",
@@ -616,13 +619,22 @@ def run_local_asr(
     json_path = Path(f"{output_prefix}.json")
     if not srt_path.is_file() or not json_path.is_file():
         raise RuntimeError("Whisper 完成后没有生成带时间戳的 SRT 和 JSON。")
-    return {
+    asr_payload: dict[str, object] = {}
+    try:
+        asr_payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        asr_payload = {}
+    result = {
         "status": "completed",
-        "backend": "local-whisper-cpp",
-        "model": str(whisper_model.expanduser().resolve()),
+        "backend": str(asr_payload.get("backend") or "local-whisper-cpp"),
+        "model": str(asr_payload.get("model") or whisper_model.expanduser().resolve()),
         "srt": srt_path.name,
         "json": json_path.name,
     }
+    for key in ("selected_device", "device_priority", "language", "language_probability"):
+        if key in asr_payload:
+            result[key] = asr_payload[key]
+    return result
 
 
 def file_sha256(path: Path) -> str:
