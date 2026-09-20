@@ -1,4 +1,4 @@
 interface:
   display_name: "Parse Video 视频助手"
-  short_description: "直接处理公开视频链接，可下载、理解或准备蒸馏证据"
-  default_prompt: "请使用 $parse-video 处理这条公开视频链接；我可以选择下载、理解总结或蒸馏。理解与蒸馏不需要打开浏览器或登录。"
+  short_description: "优先本地解析公开视频；总结时禁止浏览器 fallback"
+  default_prompt: "请优先使用 $parse-video 处理这条公开视频链接。不要调用 public-video-evidence、watch、Browser、Chrome 或无头浏览器；先用固定解析器和本地 ASR/画面证据完成总结，再按需写入知识库。"
