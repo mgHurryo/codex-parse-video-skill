@@ -27,6 +27,7 @@ source_commit: ac2a71f
 - 禁止未确认调用方就改公共函数签名。
 - 禁止把密钥写入代码。
 - 禁止为了"看起来更优雅"重写稳定模块。
+- Windows 子进程环境变量名必须按大小写不敏感处理；遗漏实际为 SYSTEMROOT/ComSpec 的系统键会导致 WinSock、DNS、Python _overlapped 和外部工具异常。
 - 禁止修改解析器时不测试实际平台链接。
 
 ## Web UI 静态资源注意事项

@@ -187,11 +187,12 @@ def safe_child_environment(
         path_parts.append(original_path)
 
     if system == "windows":
-        allowed = {
-            name: source[name]
-            for name in ("COMSPEC", "PATHEXT", "SystemDrive", "SystemRoot", "WINDIR")
-            if source.get(name)
-        }
+        source_casefold = {name.casefold(): value for name, value in source.items()}
+        allowed = {}
+        for name in ("COMSPEC", "PATHEXT", "SystemDrive", "SystemRoot", "WINDIR"):
+            value = source_casefold.get(name.casefold())
+            if value:
+                allowed[name] = value
         allowed.update(
             {
                 "HOME": str(isolated_home),

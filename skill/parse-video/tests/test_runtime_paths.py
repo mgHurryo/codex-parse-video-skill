@@ -21,8 +21,8 @@ class RuntimePathTests(unittest.TestCase):
             Path("C:/Temp/job"),
             platform_name="windows",
             environ={
-                "SystemRoot": "C:/Windows",
-                "COMSPEC": "C:/Windows/System32/cmd.exe",
+                "SYSTEMROOT": "C:/Windows",
+                "ComSpec": "C:/Windows/System32/cmd.exe",
                 "PATH": "C:/Windows/System32",
                 "PATHEXT": ".EXE;.CMD",
                 "hTtP_pRoXy": "http://secret.invalid",
@@ -31,6 +31,7 @@ class RuntimePathTests(unittest.TestCase):
         )
 
         self.assertEqual(environment["SystemRoot"], "C:/Windows")
+        self.assertEqual(environment["COMSPEC"], "C:/Windows/System32/cmd.exe")
         self.assertEqual(environment["TEMP"], str(Path("C:/Temp/job")))
         self.assertEqual(
             environment["USERPROFILE"],
