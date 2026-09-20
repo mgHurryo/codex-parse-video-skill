@@ -59,6 +59,8 @@ source_commit: ac2a71f
 | 模块 | 路径 | 职责 | 被谁调用 | 修改风险 | 证据来源 |
 |---|---|---|---|---|---|
 | 解析路由 | `parser/parser.go` | URL 域名匹配 → 平台分发 | `cmd/handlers.go`、`cmd/parse.go` | 高 | `parser/parser.go` |
+| B站解析兼容 | `parser/bilibili.go` | b23.tv 短链、API 解析、页面元数据回退与播放地址选择 | 分享链接解析、Skill 下载/理解 | 中 | `parser/bilibili.go` |
+| 抖音匿名详情 | parser/douyin.go | 短链展开后通过匿名移动端 Feed 获取普通作品详情，分享页作为图集/回退路径 | 抖音分享链接解析、Skill 下载/理解 | 中 | parser/douyin.go |
 | 平台映射表 | `parser/vars.go` | 定义 27 个平台常量、接口、数据结构 | 所有解析器 | 高 | `parser/vars.go` |
 | URL 提取 | `utils/utils.go` | 正则提取字符串中的 URL | `parser/parser.go` | 中 | `utils/utils.go:RegexpMatchUrlFromString` |
 | HTTP 中间件 | `cmd/middleware.go` | Recovery/CORS/日志/限流/BasicAuth | `cmd/serve.go` | 中 | `cmd/serve.go:43-47` |

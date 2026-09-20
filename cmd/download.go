@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/wujunwei928/parse-video/parser"
@@ -44,6 +46,18 @@ func extFromURL(rawURL string) string {
 	return ""
 }
 
+func userAgentForMediaURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return parser.DefaultUserAgent
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "bilivideo.com" || strings.HasSuffix(host, ".bilivideo.com") ||
+		(strings.HasSuffix(host, ".akamaized.net") && strings.Contains(u.Path, "/upgcxcode/")) {
+		return parser.UserAgent
+	}
+	return parser.DefaultUserAgent
+}
 func refererForMediaURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -54,19 +68,97 @@ func refererForMediaURL(rawURL string) string {
 		host == "sinaimg.cn" || strings.HasSuffix(host, ".sinaimg.cn") {
 		return "https://weibo.com/"
 	}
+	if host == "bilivideo.com" || strings.HasSuffix(host, ".bilivideo.com") {
+		return "https://www.bilibili.com/"
+	}
 	return ""
+}
+
+func bilibiliCDNCandidates(rawURL string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return []string{rawURL}
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "bilivideo.com" && !strings.HasSuffix(host, ".bilivideo.com") {
+		return []string{rawURL}
+	}
+
+	labels := strings.Split(host, ".")
+	mirrorIndex := strings.LastIndex(labels[0], "-mirror")
+	if mirrorIndex < 0 {
+		return []string{rawURL}
+	}
+	prefix := labels[0][:mirrorIndex+len("-mirror")]
+	providers := []string{"ali", "hw", "cos"}
+	candidates := make([]string, 0, len(providers)+1)
+	seen := make(map[string]struct{}, len(providers)+1)
+	for _, provider := range providers {
+		clone := *u
+		candidateLabels := append([]string(nil), labels...)
+		candidateLabels[0] = prefix + provider
+		clone.Host = strings.Join(candidateLabels, ".")
+		candidate := clone.String()
+		if _, ok := seen[candidate]; !ok {
+			seen[candidate] = struct{}{}
+			candidates = append(candidates, candidate)
+		}
+	}
+	if _, ok := seen[rawURL]; !ok {
+		candidates = append(candidates, rawURL)
+	}
+	return candidates
+}
+
+func probeMediaURL(rawURL, referer string) bool {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", userAgentForMediaURL(rawURL))
+	req.Header.Set("Range", "bytes=0-65535")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return false
+	}
+	n, copyErr := io.CopyN(io.Discard, resp.Body, 64*1024)
+	return n == 64*1024 || (copyErr == io.EOF && n > 0)
+}
+
+func selectMediaURL(rawURL string) string {
+	candidates := bilibiliCDNCandidates(rawURL)
+	if len(candidates) == 1 {
+		return rawURL
+	}
+	referer := refererForMediaURL(rawURL)
+	for _, candidate := range candidates {
+		if probeMediaURL(candidate, referer) {
+			return candidate
+		}
+	}
+	return rawURL
 }
 
 // downloadFile 下载单个文件到指定路径
 func downloadFile(fileURL, savePath string) error {
+	fileURL = selectMediaURL(fileURL)
 	request := resty.New().R().
-		SetHeader("User-Agent", parser.DefaultUserAgent).
+		SetHeader("User-Agent", userAgentForMediaURL(fileURL)).
 		SetOutput(savePath)
 	if referer := refererForMediaURL(fileURL); referer != "" {
 		request.SetHeader("Referer", referer)
 	}
 	resp, err := request.Get(fileURL)
 	if err != nil {
+		os.Remove(savePath)
 		return err
 	}
 	if resp.StatusCode() != http.StatusOK {
@@ -137,8 +229,9 @@ func downloadMedia(info *parser.VideoParseInfo, outputDir string) error {
 		fmt.Fprintf(os.Stderr, "下载封面: %s\n", filename)
 		if err := downloadFile(info.CoverUrl, filepath.Join(outputDir, filename)); err != nil {
 			fmt.Fprintf(os.Stderr, "警告: 封面下载失败: %v\n", err)
+		} else {
+			count++
 		}
-		count++
 	}
 
 	// 下载音乐
@@ -151,8 +244,9 @@ func downloadMedia(info *parser.VideoParseInfo, outputDir string) error {
 		fmt.Fprintf(os.Stderr, "下载音乐: %s\n", filename)
 		if err := downloadFile(info.MusicUrl, filepath.Join(outputDir, filename)); err != nil {
 			fmt.Fprintf(os.Stderr, "警告: 音乐下载失败: %v\n", err)
+		} else {
+			count++
 		}
-		count++
 	}
 
 	if count > 0 {

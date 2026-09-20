@@ -18,60 +18,58 @@ import (
 type douYin struct{}
 
 func (d douYin) parseVideoID(videoId string) (*VideoParseInfo, error) {
-	reqUrl := fmt.Sprintf("https://www.iesdouyin.com/share/video/%s", videoId)
-
 	client := newClient()
-	res, err := client.R().
-		SetHeader(HttpHeaderUserAgent, "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1").
-		Get(reqUrl)
-	if err != nil {
-		return nil, err
-	}
-
+	data, mobileFeedErr := d.fetchMobileFeedDetail(client, videoId)
 	isNote := false
-	resBody := res.Body()
-	canonical, err := d.getCanonicalFromHTML(string(resBody))
-	if err == nil && canonical != "" {
-		//判断字符串中是否有 /note/ 字符
-		if strings.Contains(canonical, "/note/") {
-			isNote = true
-		}
-	}
-
 	var jsonBytes []byte
-	var data gjson.Result
 
-	//获取图集
-	if isNote {
-		webId := "75" + d.generateFixedLengthNumericID(15)
-		aBogus := d.randSeq(64)
-
-		reqUrl = fmt.Sprintf("https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/?reflow_source=reflow_page&web_id=%s&device_id=%s&aweme_ids=%%5B%s%%5D&request_source=200&a_bogus=%s", webId, webId, videoId, aBogus)
-		res, err = client.R().
+	if data.Exists() {
+		jsonBytes = []byte(data.Raw)
+		isNote = len(data.Get("images").Array()) > 0
+	} else {
+		reqUrl := fmt.Sprintf("https://www.iesdouyin.com/share/video/%s", videoId)
+		res, err := client.R().
 			SetHeader(HttpHeaderUserAgent, "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1").
 			Get(reqUrl)
 		if err != nil {
 			return nil, err
 		}
 
-		jsonBytes = res.Body()
-		data = gjson.GetBytes(jsonBytes, "aweme_details.0")
-		if !data.Exists() {
-			//fmt.Println(reqUrl, data)
-			//设置为，好让下面判断
-			isNote = false
-		}
-	}
-
-	if !isNote {
-		re := regexp.MustCompile(`window._ROUTER_DATA\s*=\s*(.*?)</script>`)
-		findRes := re.FindSubmatch(resBody)
-		if len(findRes) < 2 {
-			return nil, errors.New("parse video json info from html fail")
+		resBody := res.Body()
+		canonical, err := d.getCanonicalFromHTML(string(resBody))
+		if err == nil && canonical != "" {
+			isNote = strings.Contains(canonical, "/note/")
 		}
 
-		jsonBytes = bytes.TrimSpace(findRes[1])
-		data = gjson.GetBytes(jsonBytes, "loaderData.video_(id)/page.videoInfoRes.item_list.0")
+		if isNote {
+			webId := "75" + d.generateFixedLengthNumericID(15)
+			aBogus := d.randSeq(64)
+
+			reqUrl = fmt.Sprintf("https://www.iesdouyin.com/web/api/v2/aweme/slidesinfo/?reflow_source=reflow_page&web_id=%s&device_id=%s&aweme_ids=%%5B%s%%5D&request_source=200&a_bogus=%s", webId, webId, videoId, aBogus)
+			res, err = client.R().
+				SetHeader(HttpHeaderUserAgent, "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1").
+				Get(reqUrl)
+			if err != nil {
+				return nil, err
+			}
+
+			jsonBytes = res.Body()
+			data = gjson.GetBytes(jsonBytes, "aweme_details.0")
+			if !data.Exists() {
+				isNote = false
+			}
+		}
+
+		if !isNote {
+			re := regexp.MustCompile(`window._ROUTER_DATA\s*=\s*(.*?)</script>`)
+			findRes := re.FindSubmatch(resBody)
+			if len(findRes) < 2 {
+				return nil, fmt.Errorf("移动端 Feed 获取失败（%v），且分享页缺少视频数据", mobileFeedErr)
+			}
+
+			jsonBytes = bytes.TrimSpace(findRes[1])
+			data = gjson.GetBytes(jsonBytes, "loaderData.video_(id)/page.videoInfoRes.item_list.0")
+		}
 	}
 
 	if !data.Exists() {
@@ -81,18 +79,17 @@ func (d douYin) parseVideoID(videoId string) (*VideoParseInfo, error) {
 		)
 
 		return nil, fmt.Errorf(
-			"get video info fail: %s - %s",
+			"get video info fail: %s - %s (mobile feed: %v)",
 			filterObj.Get("filter_reason"),
 			filterObj.Get("detail_msg"),
+			mobileFeedErr,
 		)
 	}
 
-	// 获取图集图片地址
 	imagesObjArr := data.Get("images").Array()
 	images := make([]ImgInfo, 0, len(imagesObjArr))
 	for _, imageItem := range imagesObjArr {
 		urlList := imageItem.Get("url_list").Array()
-		// 优先获取非 .webp 格式的图片 url
 		imageUrl := d.getNoWebpUrl(urlList)
 		if len(imageUrl) > 0 {
 			images = append(images, ImgInfo{
@@ -104,20 +101,14 @@ func (d douYin) parseVideoID(videoId string) (*VideoParseInfo, error) {
 
 	var videoUrl string
 	if !isNote {
-		// 获取视频播放地址
-		videoUrl = data.Get("video.play_addr.url_list.0").String()
+		videoUrl = data.Get("video.play_addr_h264.url_list.0").String()
+		if videoUrl == "" {
+			videoUrl = data.Get("video.play_addr.url_list.0").String()
+		}
 		videoUrl = strings.ReplaceAll(videoUrl, "playwm", "play")
-		data.Get("video.play_addr.url_list").ForEach(func(key, value gjson.Result) bool {
-			//fmt.Println(strings.ReplaceAll(value.String(), "playwm", "play"))
-			return true
-		})
 	}
 
-	// 获取音频地址（图集时，video.play_addr.uri 是音频地址；视频时不是音频）
 	musicUrl := data.Get("video.play_addr.uri").String()
-
-	// 如果图集地址不为空时，因为没有视频，上面抖音返回的视频地址无法访问，置空处理
-	// 图集时，musicUrl 是音频地址；视频时，musicUrl 不是音频，置空
 	if len(images) > 0 {
 		videoUrl = ""
 	} else {
@@ -125,14 +116,15 @@ func (d douYin) parseVideoID(videoId string) (*VideoParseInfo, error) {
 	}
 
 	urlList := data.Get("video.cover.url_list").Array()
-	// 优先获取非 .webp 格式的图片 url
 	coverUrl := d.getNoWebpUrl(urlList)
+	if coverUrl == "" {
+		coverUrl = d.getNoWebpUrl(data.Get("video.origin_cover.url_list").Array())
+	}
 
 	videoInfo := &VideoParseInfo{
 		Title:    data.Get("desc").String(),
 		VideoUrl: videoUrl,
 		MusicUrl: musicUrl,
-		//CoverUrl: data.Get("video.cover.url_list.0").String(),
 		CoverUrl: coverUrl,
 		Images:   images,
 	}
@@ -140,8 +132,6 @@ func (d douYin) parseVideoID(videoId string) (*VideoParseInfo, error) {
 	videoInfo.Author.Name = data.Get("author.nickname").String()
 	videoInfo.Author.Avatar = data.Get("author.avatar_thumb.url_list.0").String()
 
-	// 视频地址非空时，获取302重定向之后的视频地址
-	// 图集时，视频地址为空，不处理
 	if len(videoInfo.VideoUrl) > 0 {
 		d.getRedirectUrl(videoInfo)
 	}
@@ -153,6 +143,54 @@ func (d douYin) parseVideoID(videoId string) (*VideoParseInfo, error) {
 	return videoInfo, nil
 }
 
+const douyinMobileFeedUserAgent = "com.ss.android.ugc.aweme/290101 (Linux; U; Android 10; zh_CN; Pixel 4; Build/QQ3A.200805.001; Cronet/TTNetVersion:5f9037be 2023-01-13 QuicVersion:4668bb42 2022-11-21)"
+
+var douyinMobileFeedEndpoints = []string{
+	"https://api5-normal-c-hl.amemv.com/aweme/v1/feed/",
+	"https://aweme.snssdk.com/aweme/v1/feed/",
+}
+
+func (d douYin) fetchMobileFeedDetail(client *resty.Client, videoID string) (gjson.Result, error) {
+	if client == nil {
+		client = newClient()
+	}
+	var lastErr error
+	for _, endpoint := range douyinMobileFeedEndpoints {
+		resp, err := client.R().
+			SetHeader(HttpHeaderUserAgent, douyinMobileFeedUserAgent).
+			SetHeader("Accept", "application/json, text/plain, */*").
+			SetQueryParams(map[string]string{
+				"aweme_id": videoID,
+				"aid":      "1128",
+			}).
+			Get(endpoint)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode() != 200 {
+			lastErr = fmt.Errorf("%s 返回 HTTP %d", endpoint, resp.StatusCode())
+			continue
+		}
+		if detail := findDouyinAwemeByID(resp.Body(), videoID); detail.Exists() {
+			return detail, nil
+		}
+		lastErr = fmt.Errorf("%s 未返回目标作品", endpoint)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("移动端 Feed 没有可用节点")
+	}
+	return gjson.Result{}, lastErr
+}
+
+func findDouyinAwemeByID(body []byte, videoID string) gjson.Result {
+	for _, item := range gjson.GetBytes(body, "aweme_list").Array() {
+		if item.Get("aweme_id").String() == videoID || item.Get("id").String() == videoID {
+			return item
+		}
+	}
+	return gjson.Result{}
+}
 func (d douYin) parseShareUrl(shareUrl string) (*VideoParseInfo, error) {
 	urlRes, err := url.Parse(shareUrl)
 	if err != nil {
@@ -249,13 +287,25 @@ func (d douYin) parseVideoIdFromPath(urlPath string) (string, error) {
 
 func (d douYin) getRedirectUrl(videoInfo *VideoParseInfo) {
 	client := newClient()
+	client.SetTimeout(8 * time.Second)
 	client.SetRedirectPolicy(resty.NoRedirectPolicy())
-	res2, _ := client.R().
+	res, err := client.R().
 		SetHeader(HttpHeaderUserAgent, DefaultUserAgent).
+		SetHeader("Range", "bytes=0-0").
+		SetDoNotParseResponse(true).
 		Get(videoInfo.VideoUrl)
-	locationRes, _ := res2.RawResponse.Location()
-	if locationRes != nil {
-		(*videoInfo).VideoUrl = locationRes.String()
+	if res != nil && res.RawBody() != nil {
+		defer res.RawBody().Close()
+	}
+	if err != nil && !errors.Is(err, resty.ErrAutoRedirectDisabled) {
+		return
+	}
+	if res == nil || res.RawResponse == nil {
+		return
+	}
+	locationRes, locationErr := res.RawResponse.Location()
+	if locationErr == nil && locationRes != nil {
+		videoInfo.VideoUrl = locationRes.String()
 	}
 }
 

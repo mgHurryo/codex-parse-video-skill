@@ -1,7 +1,9 @@
 package parser
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -14,6 +16,8 @@ import (
 
 const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
 
+const biliInitialStatePrefix = "window.__INITIAL_STATE__="
+
 type biliBili struct{}
 
 func (b biliBili) parseShareUrl(shareUrl string) (*VideoParseInfo, error) {
@@ -21,17 +25,9 @@ func (b biliBili) parseShareUrl(shareUrl string) (*VideoParseInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("无法提取BVID: %w", err)
 	}
-	viewAPIURL := fmt.Sprintf("https://api.bilibili.com/x/web-interface/view?bvid=%s", bvid)
-	viewRespBytes, err := b.sendBiliRequest(viewAPIURL)
+	viewResp, err := b.getViewResponse(bvid)
 	if err != nil {
-		return nil, fmt.Errorf("请求视频信息API失败: %w", err)
-	}
-	var viewResp biliViewResponse
-	if err := json.Unmarshal(viewRespBytes, &viewResp); err != nil {
-		return nil, fmt.Errorf("解析视频信息响应失败: %w", err)
-	}
-	if viewResp.Code != 0 {
-		return nil, fmt.Errorf("B站API返回错误: %s (code: %d)", viewResp.Message, viewResp.Code)
+		return nil, fmt.Errorf("获取视频信息失败: %w", err)
 	}
 	if len(viewResp.Data.Pages) == 0 {
 		return nil, fmt.Errorf("视频没有可用的分页数据")
@@ -43,17 +39,9 @@ func (b biliBili) parseShareUrl(shareUrl string) (*VideoParseInfo, error) {
 		bvid, firstPageCID,
 	)
 
-	playRespBytes, err := b.sendBiliRequest(playAPIURL)
+	playResp, err := b.getPlayResponse(playAPIURL)
 	if err != nil {
-		return nil, fmt.Errorf("请求播放链接API失败: %w", err)
-	}
-
-	var playResp biliPlayURLResponse
-	if err := json.Unmarshal(playRespBytes, &playResp); err != nil {
-		return nil, fmt.Errorf("解析播放链接响应失败: %w", err)
-	}
-	if playResp.Code != 0 {
-		return nil, fmt.Errorf("B站API返回错误: %s (code: %d)", playResp.Message, playResp.Code)
+		return nil, err
 	}
 
 	if len(playResp.Data.Durl) > 0 && playResp.Data.Durl[0].URL != "" {
@@ -73,6 +61,115 @@ func (b biliBili) parseShareUrl(shareUrl string) (*VideoParseInfo, error) {
 	}
 
 	return nil, fmt.Errorf("无法获取该视频")
+}
+
+func (b biliBili) getPlayResponse(playAPIURL string) (*biliPlayURLResponse, error) {
+	var firstValid *biliPlayURLResponse
+	for attempt := 0; attempt < 3; attempt++ {
+		playRespBytes, err := b.sendBiliRequest(playAPIURL)
+		if err != nil {
+			if firstValid != nil {
+				break
+			}
+			return nil, fmt.Errorf("请求播放链接API失败: %w", err)
+		}
+		var playResp biliPlayURLResponse
+		if err := json.Unmarshal(playRespBytes, &playResp); err != nil {
+			return nil, fmt.Errorf("解析播放链接响应失败: %w", err)
+		}
+		if playResp.Code != 0 {
+			return nil, fmt.Errorf("B站API返回错误: %s (code: %d)", playResp.Message, playResp.Code)
+		}
+		if len(playResp.Data.Durl) == 0 || playResp.Data.Durl[0].URL == "" {
+			continue
+		}
+		if firstValid == nil {
+			copy := playResp
+			firstValid = &copy
+		}
+		if isBiliVideoURL(playResp.Data.Durl[0].URL) {
+			return &playResp, nil
+		}
+	}
+	if firstValid != nil {
+		return firstValid, nil
+	}
+	return nil, fmt.Errorf("无法获取该视频")
+}
+
+func isBiliVideoURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "bilivideo.com" || strings.HasSuffix(host, ".bilivideo.com")
+}
+func (b biliBili) getViewResponse(bvid string) (*biliViewResponse, error) {
+	viewAPIURL := fmt.Sprintf("https://api.bilibili.com/x/web-interface/view?bvid=%s", bvid)
+	viewRespBytes, apiErr := b.sendBiliRequest(viewAPIURL)
+	if apiErr == nil {
+		var viewResp biliViewResponse
+		if err := json.Unmarshal(viewRespBytes, &viewResp); err == nil && viewResp.Code == 0 && len(viewResp.Data.Pages) > 0 {
+			return &viewResp, nil
+		}
+	}
+
+	pageURL := fmt.Sprintf("https://www.bilibili.com/video/%s", bvid)
+	pageResp, pageErr := newClient().R().
+		SetHeader(HttpHeaderUserAgent, UserAgent).
+		SetHeader(HttpHeaderReferer, "https://www.bilibili.com/").
+		Get(pageURL)
+	if pageErr != nil {
+		return nil, fmt.Errorf("视频信息API不可用（%v），页面回退也失败: %w", apiErr, pageErr)
+	}
+	if pageResp.StatusCode() != 200 {
+		return nil, fmt.Errorf("视频信息API不可用（%v），页面回退HTTP状态码: %d", apiErr, pageResp.StatusCode())
+	}
+	viewResp, err := parseBiliInitialState(pageResp.Body())
+	if err != nil {
+		return nil, fmt.Errorf("视频信息API不可用（%v），页面回退解析失败: %w", apiErr, err)
+	}
+	return viewResp, nil
+}
+
+func parseBiliInitialState(body []byte) (*biliViewResponse, error) {
+	prefix := []byte(biliInitialStatePrefix)
+	index := bytes.Index(body, prefix)
+	if index < 0 {
+		return nil, fmt.Errorf("页面缺少 __INITIAL_STATE__")
+	}
+	var state biliInitialState
+	decoder := json.NewDecoder(bytes.NewReader(body[index+len(prefix):]))
+	if err := decoder.Decode(&state); err != nil {
+		return nil, err
+	}
+	if state.VideoData.Bvid == "" || len(state.VideoData.Pages) == 0 {
+		return nil, fmt.Errorf("页面视频数据不完整")
+	}
+	response := &biliViewResponse{Code: 0, Message: "OK"}
+	response.Data.Bvid = state.VideoData.Bvid
+	response.Data.Title = state.VideoData.Title
+	response.Data.Pic = state.VideoData.Pic
+	response.Data.Owner = state.VideoData.Owner
+	response.Data.Pages = state.VideoData.Pages
+	return response, nil
+}
+
+type biliInitialState struct {
+	VideoData struct {
+		Bvid  string `json:"bvid"`
+		Title string `json:"title"`
+		Pic   string `json:"pic"`
+		Owner struct {
+			Mid  int64  `json:"mid"`
+			Name string `json:"name"`
+			Face string `json:"face"`
+		} `json:"owner"`
+		Pages []struct {
+			Cid int `json:"cid"`
+		} `json:"pages"`
+	} `json:"videoData"`
 }
 
 type biliViewResponse struct {
@@ -123,11 +220,14 @@ func (b biliBili) getBvidFromURL(rawURL string) (string, error) {
 	if strings.Contains(parsedURL.Host, "b23.tv") {
 		client := newClient()
 		client.SetRedirectPolicy(resty.NoRedirectPolicy())
-		resp, err := client.R().
+		resp, requestErr := client.R().
 			SetHeader(HttpHeaderUserAgent, UserAgent).
 			Get(rawURL)
-		if err != nil {
-			return "", fmt.Errorf("请求b23.tv短链失败: %v", err)
+		if requestErr != nil && !errors.Is(requestErr, resty.ErrAutoRedirectDisabled) {
+			return "", fmt.Errorf("请求b23.tv短链失败: %v", requestErr)
+		}
+		if resp == nil {
+			return "", fmt.Errorf("b23.tv短链没有返回响应")
 		}
 
 		location := resp.Header().Get("Location")
@@ -157,6 +257,7 @@ func (b biliBili) sendBiliRequest(apiURL string) ([]byte, error) {
 		// 如需爬取更高清的视频请取消这里的注释
 		// SetHeader(HttpHeaderCookie, BiliCookie).
 		SetHeader(HttpHeaderReferer, "https://www.bilibili.com/").
+		SetHeader("Origin", "https://www.bilibili.com").
 		Get(apiURL)
 	if err != nil {
 		return nil, err

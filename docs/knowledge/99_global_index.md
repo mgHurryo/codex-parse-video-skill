@@ -45,6 +45,8 @@ source_commit: ac2a71f
 |---|---|---|---|
 | `parser/vars.go:videoSourceInfoMapping` | 27 个平台映射表 | 所有解析 | 高 |
 | `parser/parser.go:ParseVideoShareUrl` | URL 域名匹配→平台路由 | 分享链接解析 | 高 |
+| `parser/bilibili.go` | B站短链解析、页面回退和播放地址获取 | B站分享链接解析 | 中 |
+| parser/douyin.go | 抖音短链、匿名移动端 Feed 和分享页回退 | 抖音分享链接解析 | 中 |
 | `parser/parser.go:ParseVideoId` | 平台+ID→解析路由 | ID 解析 | 高 |
 | `parser/parser.go:BatchParseVideoId` | 批量并发解析 | 批量解析 | 中 |
 | `parser/weibo.go:parseMobileApiData` | 从公开微博状态响应提取视频、封面、图集和作者信息 | 微博分享链接解析 | 中 |
